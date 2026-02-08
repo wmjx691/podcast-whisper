@@ -1,0 +1,11 @@
+# 忽略資料夾
+data/
+__pycache__/
+.ipynb_checkpoints/
+
+# 忽略環境設定檔 (若未來有API Key絕對不能上傳)
+.env
+.vscode/
+
+# 忽略系統檔
+.DS_Store
