@@ -2,20 +2,17 @@ import os
 import time
 import json
 from faster_whisper import WhisperModel
-from typing import Optional
+from typing import Optional, List
 
 class PodcastTranscriber:
-    def __init__(self, model_size: str = "medium", device: str = "auto", compute_type: str = "int8"):
+    def __init__(self, model_size: str = "large-v3", device: str = "auto", compute_type: str = "int8"):
         """
         初始化轉錄器
         :param model_size: 模型大小 (建議用 large-v3 以獲得最佳中文效果)
-        :param device: "cpu" 或 "cuda" (您的筆電會自動選 cpu)
+        :param device: "cpu" 或 "cuda"
         :param compute_type: "int8" (省記憶體關鍵)
         """
-        print(f"正在載入 Whisper 模型: {model_size} ({device})...")
-        print("如果是第一次執行，會自動下載約 3GB 的模型檔，請耐心等候...")
-        
-        # 載入模型
+        print(f"🚀 正在載入 Whisper 模型: {model_size} ({device})...")
         self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
         print("✅ 模型載入完成！")
 
@@ -28,14 +25,25 @@ class PodcastTranscriber:
             return None
 
         file_name = os.path.basename(audio_path)
-        print(f"\n🎙️ 開始轉錄: {file_name}")
+        
+        # 準備輸出路徑
+        output_dir = os.path.join(os.path.dirname(audio_path), "../transcripts")
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        base_name = os.path.splitext(file_name)[0]
+        txt_path = os.path.join(output_dir, f"{base_name}.txt")
+        json_path = os.path.join(output_dir, f"{base_name}.json")
+
+        # 檢查是否已經轉錄過 (避免重複執行)
+        if os.path.exists(txt_path) and os.path.exists(json_path):
+            print(f"⏭️  跳過已轉錄檔案: {file_name}")
+            return txt_path
+
+        print(f"\n🎙️  開始轉錄: {file_name}")
         start_time = time.time()
 
         try:
-            # --- 1. 執行轉錄 ---
-            # language="zh": 強制指定中文
-            # beam_size=5: 這是官方建議的最佳參數，搜尋最準確的句子
-            # vad_filter=True: 過濾無聲片段
             segments, info = self.model.transcribe(
                 audio_path, 
                 beam_size=5, 
@@ -43,44 +51,24 @@ class PodcastTranscriber:
                 vad_filter=True
             )
 
-            print(f"   ℹ️ 偵測語言: {info.language} (信心度: {info.language_probability:.2f})")
-            print(f"   ℹ️ 音訊長度: {info.duration:.2f} 秒")
-            print("   ⏳ 轉錄中 (請稍候，長音檔會跑比較久)...")
-
-            # --- 2. 準備輸出 ---
-            # 建立 output 資料夾 (如果沒有的話)
-            output_dir = os.path.join(os.path.dirname(audio_path), "../transcripts")
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-
-            base_name = os.path.splitext(file_name)[0]
-            txt_path = os.path.join(output_dir, f"{base_name}.txt")
-            json_path = os.path.join(output_dir, f"{base_name}.json")
-
-            # 用來收集所有段落的清單 (給 JSON 用)
+            print(f"   ℹ️  語言: {info.language} (信心度: {info.language_probability:.2f}) | 長度: {info.duration:.2f}s")
+            
             transcript_data = []
 
-            # --- 3. 寫入檔案 (即時寫入 TXT) ---
             with open(txt_path, "w", encoding="utf-8") as f:
-                f.write(f"來源檔案: {file_name}\n")
-                f.write(f"模型版本: large-v3\n")
+                f.write(f"來源: {file_name}\n")
+                f.write(f"模型: large-v3 | 時間: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write("-" * 50 + "\n\n")
 
-                # segments 是一個 Generator，這裡開始跑迴圈才會真正開始運算
                 for i, segment in enumerate(segments, 1):
-                    # 時間格式化 [MM:SS]
                     start_m, start_s = divmod(int(segment.start), 60)
                     end_m, end_s = divmod(int(segment.end), 60)
                     time_str = f"[{start_m:02d}:{start_s:02d} -> {end_m:02d}:{end_s:02d}]"
-                    
-                    # 組合文字
                     text = segment.text.strip()
-                    line = f"{time_str} {text}"
                     
-                    # 1. 寫入 TXT
+                    line = f"{time_str} {text}"
                     f.write(line + "\n")
                     
-                    # 2. 存入記憶體 (給 JSON)
                     transcript_data.append({
                         "id": i,
                         "start": segment.start,
@@ -88,43 +76,54 @@ class PodcastTranscriber:
                         "text": text
                     })
 
-                    # 3. 每轉錄 10 句在終端機印一次 (避免洗版，也讓你知道它還活著)
-                    if i % 10 == 0:
-                        print(f"   -> 已處理到: {time_str}")
+                    # 每 20 句印一次進度
+                    if i % 20 == 0:
+                        print(f"   -> 處理中: {time_str}")
 
-            # --- 4. 寫入 JSON (結構化資料) ---
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(transcript_data, f, ensure_ascii=False, indent=2)
 
             duration = time.time() - start_time
-            print(f"\n✅ 轉錄完成！耗時: {duration:.2f} 秒")
-            print(f"📄 文字檔: {txt_path}")
-            print(f"📊 數據檔: {json_path}")
+            print(f"✅ 完成！耗時: {duration:.2f}s")
             return txt_path
 
         except Exception as e:
-            print(f"❌ 轉錄失敗: {e}")
+            print(f"❌ 失敗: {file_name} - {e}")
             return None
+
+    def transcribe_folder(self, folder_path: str) -> None:
+        """
+        批次轉錄資料夾內的所有音訊檔案
+        """
+        if not os.path.exists(folder_path):
+            print(f"❌ 資料夾不存在: {folder_path}")
+            return
+
+        # 支援的音訊格式
+        audio_extensions = ('.mp3', '.m4a', '.wav', '.flac')
+        
+        # 找出所有音訊檔
+        files = [f for f in os.listdir(folder_path) if f.lower().endswith(audio_extensions)]
+        files.sort() # 排序，確保順序一致
+        
+        total_files = len(files)
+        print(f"\n📂 準備處理資料夾: {folder_path}")
+        print(f"📊 共發現 {total_files} 個音訊檔案")
+        print("=" * 50)
+
+        for index, file_name in enumerate(files, 1):
+            print(f"\n[{index}/{total_files}] 處理檔案: {file_name}")
+            audio_path = os.path.join(folder_path, file_name)
+            self.transcribe_file(audio_path)
+            
+        print("\n🎉 所有檔案處理完畢！")
 
 # --- 測試區 ---
 if __name__ == "__main__":
-    # 使用 medium 模型 (第一次執行會下載)
-    # 您的 CPU (Ryzen AI 9) 絕對跑得動 int8 量化版
+    # 初始化 (如果您覺得 large-v3 太慢，這裡可以改回 small)
     transcriber = PodcastTranscriber(model_size="small", device="cpu", compute_type="int8")
     
-    # 請修改這裡：填入您剛剛下載的「歐本豪斯」音檔檔名
-    # 建議先用剛剛下載好的那個 mp3 來測
-    # 假設檔案在 data/audio/
+    # 指定要處理的資料夾
+    audio_folder = "data/audio/openhouse"
     
-    # 這裡教您一個小技巧：自動抓 data/audio 資料夾裡最新的一個 mp3
-    audio_dir = "data/audio/openhouse"
-    if os.path.exists(audio_dir):
-        files = [os.path.join(audio_dir, f) for f in os.listdir(audio_dir) if f.endswith(('.mp3', '.m4a'))]
-        if files:
-            # 找最新的檔案
-            latest_file = max(files, key=os.path.getctime)
-            transcriber.transcribe_file(latest_file)
-        else:
-            print(f"{audio_dir} 資料夾是空的，請先執行 rss_parser.py 下載音檔。")
-    else:
-        print(f"找不到 {audio_dir} 資料夾。")
+    transcriber.transcribe_folder(audio_folder)
