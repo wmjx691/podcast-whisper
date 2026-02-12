@@ -41,7 +41,7 @@ Built with Python, this project leverages **RSS feed parsing** to automatically 
 
 1. Clone the repository:
    ```bash
-   git clone [https://github.com/YourUsername/podcast-whisper.git](https://github.com/YourUsername/podcast-whisper.git)
+   git clone https://github.com/KevinYu/podcast-whisper.git
    ```
 2. Install dependencies:
    ```bash
