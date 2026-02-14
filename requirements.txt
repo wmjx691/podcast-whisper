@@ -2,3 +2,4 @@ faster-whisper
 feedparser
 requests
 tqdm
+opencc-python-reimplemented

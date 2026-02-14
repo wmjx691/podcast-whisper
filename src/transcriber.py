@@ -5,6 +5,7 @@ import sys
 from faster_whisper import WhisperModel
 from typing import Optional
 from tqdm import tqdm
+from opencc import OpenCC
 
 # --- 環境與路徑輔助函式 ---
 def detect_environment():
@@ -29,6 +30,9 @@ class PodcastTranscriber:
         project_root = get_project_root()
         model_root = os.path.join(project_root, "models")
         
+        # s2twp 代表：Simplified to Traditional (Taiwan) with Phrases (包含台灣慣用語轉換)
+        self.cc = OpenCC('s2twp')
+
         if not os.path.exists(model_root):
             os.makedirs(model_root)
 
@@ -95,7 +99,10 @@ class PodcastTranscriber:
             # 設定進度條
             with tqdm(total=round(info.duration, 2), unit='s', desc="Processing", leave=True, ascii=True, ncols=100) as pbar:
                 for i, segment in enumerate(segments, 1):
-                    text = segment.text.strip()
+                    raw_text = segment.text.strip()
+                    
+                    # --- 新增：強制轉繁體 ---
+                    text = self.cc.convert(raw_text)
                     
                     # --- 改良版去重邏輯 ---
                     if text == last_text:
@@ -172,11 +179,11 @@ if __name__ == "__main__":
     # 您可以在這裡自由修改，完全不用動到上面的程式碼
     
     # [設定] 模型大小
-    MODEL_SIZE = "large-v3"
+    MODEL_SIZE = "small"  # 可選 tiny, base, small, medium, large-v3 (視硬體能力而定)
     
     # [設定] 音檔輸入與輸出位置
-    INPUT_AUDIO_DIR = os.path.join(PROJECT_ROOT, "data", "audio", "mt_taipei")
-    OUTPUT_TRANSCRIPT_DIR = os.path.join(PROJECT_ROOT, "data", "transcripts", "mt_taipei")
+    INPUT_AUDIO_DIR = os.path.join(PROJECT_ROOT, "data", "audio", "openhouse")
+    OUTPUT_TRANSCRIPT_DIR = os.path.join(PROJECT_ROOT, "data", "transcripts", "openhouse")
     
     # [設定] 轉錄參數
     # 如果您的音檔不一定是繁中，這裡可以設為 None，讓模型自動偵測語言
