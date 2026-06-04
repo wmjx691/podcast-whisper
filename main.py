@@ -37,8 +37,8 @@ def main():
     FORCE_RETRANSCRIBE = False     # 設為 True 時，會無視已存在的舊檔案，強制全部重新轉錄覆蓋
 
     # 🌟 新增：將語言與 Prompt 抽離到控制面板，方便切換！
-    TARGET_LANGUAGE = "en" # 若是中文請填 "zh"，不知道就填 None 讓模型自動偵測
-    INITIAL_PROMPT = ""    # 轉錄英文歌不需要中文 prompt，請留空或填入英文提示
+    TARGET_LANGUAGE = "zh" # 若是中文請填 "zh"，不知道就填 None 讓模型自動偵測
+    INITIAL_PROMPT = "這是一段Podcast對話。請將語音內容準確轉錄為繁體中文。"    # 轉錄英文歌不需要中文 prompt，請留空或填入英文提示
     
     DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID")
     if not DRIVE_FOLDER_ID:
