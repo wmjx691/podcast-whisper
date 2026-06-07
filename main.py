@@ -111,6 +111,17 @@ def main():
             completed_bases=completed_bases, 
             completed_eps=completed_eps
         )
+        # # 您可以直接填寫特定集數，例如: TARGET_EPS = [418, 414, 408]
+        # # 或者使用 range 來產生連續區間，例如: TARGET_EPS = list(range(400, 406))
+        # # TARGET_EPS = [418, 414, 408] 
+        # TARGET_EPS = list(range(443, 458))
+        # # 呼叫指定集數下載器
+        # download_result = downloader.download_specific_episodes(
+        #     target_numbers=TARGET_EPS,
+        #     completed_bases=completed_bases, 
+        #     completed_eps=completed_eps
+        # )
+        
     elif SOURCE_TYPE == "youtube":
         yt_downloader = YouTubeDownloader(audio_dir)
         # 🌟 修改：傳遞 completed_bases。如果開啟強制重轉，就傳入空集合讓它乖乖重抓
@@ -120,8 +131,8 @@ def main():
         print("❌ 未知的 SOURCE_TYPE 設定！")
         return
 
-    # --- 步驟二：執行語音轉錄 ---
-    print("\n>> [步驟 2/4]: 執行 Whisper 語音轉錄...")
+    # --- 步驟二與步驟三/四融合：即時隨轉隨傳架構	---
+    print("\n>> [步驟 2~4]: 執行 Whisper 語音轉錄與即時雲端同步...")
     
     if not download_result:
         print("⏭️ 這次沒有需要轉錄的新檔案或指定集數。")
@@ -135,6 +146,10 @@ def main():
         # 🌟 核心修改：不再掃描整個資料夾，而是精準針對這次指定的檔案名單進行轉錄
         for file_name in download_result:
             audio_path = os.path.join(audio_dir, file_name)
+            base_name = os.path.splitext(file_name)[0]
+            txt_path = os.path.join(transcript_dir, f"{base_name}.txt")
+            
+            # 1. 執行單集轉錄
             transcriber.transcribe_file(
                 audio_path=audio_path,
                 output_dir=transcript_dir,
@@ -142,30 +157,23 @@ def main():
                 initial_prompt=INITIAL_PROMPT,
                 force_retranscribe=FORCE_RETRANSCRIBE
             )
+            
+            # 2. 驗證產出結果並即時上傳
+            if os.path.exists(txt_path) and os.path.getsize(txt_path) > 0:
+                print(f"\n   ☁️ [即時備份] 正在將 {base_name} 同步至雲端...")
+                just_finished_files = [f"{base_name}.txt", f"{base_name}.json"]
+                
+                upload_files_to_drive(
+                    folder_id=DRIVE_FOLDER_ID, 
+                    target_dir=transcript_dir, 
+                    files_to_upload=just_finished_files,
+                    podcast_name=target_name
+                )
+            else:
+                print(f"   ⚠️ 警告: {base_name} 轉錄結果為空或失敗，跳過上傳。")
+                
+            print("-" * 50) # 畫一條分隔線，準備處理下一集
 
-    # --- 步驟三：彙整待上傳清單 ---
-    print("\n>> [步驟 3/4]: 盤點需要上傳至雲端的檔案...")
-    # 除了情報局抓出的「卡在本地舊檔」，加上這次「剛剛才處理完的新集數」
-    for file_name in download_result:
-        base_name = os.path.splitext(file_name)[0]
-        pending_uploads.append(f"{base_name}.txt")
-        pending_uploads.append(f"{base_name}.json")
-
-    # 剔除重複的檔名
-    pending_uploads = list(set(pending_uploads))
-
-    # --- 步驟四：上傳至雲端硬碟 ---
-    print("\n>> [步驟 4/4]: 上傳結果至 Google Drive...")
-    if pending_uploads:
-        upload_files_to_drive(
-            folder_id=DRIVE_FOLDER_ID, 
-            target_dir=transcript_dir, 
-            files_to_upload=pending_uploads,
-            podcast_name=target_name
-        )
-    else:
-        print("☁️ 雲端已同步至最新狀態，沒有新檔案需要上傳。")
-        
     print("\n========== ✅ 自動化流程執行完畢！ ==========")
 
 if __name__ == "__main__":

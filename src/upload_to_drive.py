@@ -103,6 +103,17 @@ def upload_files_to_drive(folder_id: str, target_dir: str = None, files_to_uploa
 
     print(f"📂 準備上傳 {len(actual_files)} 個檔案至 Google Drive 子資料夾...")
 
+    # 🌟 新增：先取得雲端目標資料夾內的所有現存檔案，建立 {檔名: ID} 的對照表
+    existing_files_map = {}
+    query = f"'{upload_target_id}' in parents and trashed=false"
+    try:
+        # 抓取現存檔案清單
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        for item in results.get('files', []):
+            existing_files_map[item['name']] = item['id']
+    except Exception as e:
+        print(f"⚠️ 無法取得雲端現存檔案清單，將全部視為新建: {e}")
+    
     for filename in actual_files:
         filepath = os.path.join(transcripts_dir, filename)
         if not os.path.exists(filepath):
@@ -117,20 +128,16 @@ def upload_files_to_drive(folder_id: str, target_dir: str = None, files_to_uploa
         if os.path.exists(json_filepath):
             try:
                 with open(json_filepath, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    metadata = data.get("metadata", {})
+                    metadata = json.load(f).get("metadata", {})
                     if metadata:
                         app_properties = {
                             "model_size": metadata.get("model_size", "unknown"),
                             "environment": metadata.get("environment", "unknown")
                         }
-            except Exception as e:
+            except Exception:
                 pass
 
-        file_metadata = {
-            'name': filename,
-            'parents': [upload_target_id] # 🌟 修改：傳到對應的子資料夾
-        }
+        file_metadata = {'name': filename}
         
         # 將抽出來的 Metadata 塞進 Google Drive 的隱藏屬性 appProperties 裡面
         if app_properties:
@@ -139,13 +146,24 @@ def upload_files_to_drive(folder_id: str, target_dir: str = None, files_to_uploa
         mimetype = 'application/json' if filename.endswith('.json') else 'text/plain'
         media = MediaFileUpload(filepath, mimetype=mimetype, resumable=True)
 
-        print(f"⬆️  正在上傳: {filename} ...", end="", flush=True)
+        print(f"⬆️  正在同步: {filename} ...", end="", flush=True)
         try:
-            uploaded_file = service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id'
-            ).execute()
-            print(f" ✅ 完成 (雲端 ID: {uploaded_file.get('id')})")
+            # 🌟 核心防呆：判斷是要 Update 還是 Create
+            if filename in existing_files_map:
+                file_id = existing_files_map[filename]
+                service.files().update(
+                    fileId=file_id,
+                    body=file_metadata, # 更新 Metadata
+                    media_body=media    # 覆蓋實體檔案內容
+                ).execute()
+                print(f" ✅ 覆蓋成功 (雲端 ID: {file_id})")
+            else:
+                file_metadata['parents'] = [upload_target_id]
+                uploaded_file = service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id'
+                ).execute()
+                print(f" ✅ 新建成功 (雲端 ID: {uploaded_file.get('id')})")
         except Exception as e:
             print(f" ❌ 失敗: {e}")
