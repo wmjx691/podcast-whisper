@@ -1,0 +1,91 @@
+name: GCS Authority Evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  gcs-authority-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Authenticate to Google Cloud with Direct WIF
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: verdant-sprite-487903-k9
+          workload_identity_provider: projects/1023001238607/locations/global/workloadIdentityPools/github-podcast-evidence/providers/github-actions-evidence
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: verdant-sprite-487903-k9
+          version: ">= 416.0.0"
+
+      - name: Prove generation-based write authority
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUCKET="podcast-ap1b-gcs-authority-spike-20260906-5c52166b2950"
+          OBJECT="AP1B-GCS-RUNTIME/github/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/authority.json"
+          URI="gs://${BUCKET}/${OBJECT}"
+          SESSION_M_URI="gs://${BUCKET}/AP1B-GCS-SESSION-M/20260906T115933Z/G2/authority.json"
+
+          gcloud storage objects describe "$SESSION_M_URI"
+
+          PAYLOAD_V1=$(printf '{"experiment":"github-runtime-feasibility","owner_id":"github-writer","epoch":1,"run_id":"%s","run_attempt":"%s"}' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT")
+          printf '%s\n' "$PAYLOAD_V1" | gcloud storage cp - "$URI" --if-generation-match=0
+
+          GEN_N=$(gcloud storage objects describe "$URI" --format='value(generation)')
+          [[ -n "$GEN_N" ]]
+
+          PAYLOAD_V2=$(printf '{"experiment":"github-runtime-feasibility","owner_id":"github-writer-updated","epoch":2,"run_id":"%s","run_attempt":"%s"}' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT")
+          printf '%s\n' "$PAYLOAD_V2" | gcloud storage cp - "$URI" --if-generation-match="$GEN_N"
+
+          GEN_NEW=$(gcloud storage objects describe "$URI" --format='value(generation)')
+          [[ -n "$GEN_NEW" ]]
+          [[ "$GEN_NEW" != "$GEN_N" ]]
+
+          STALE_PAYLOAD=$(printf '{"experiment":"github-runtime-feasibility","owner_id":"stale-github-writer","epoch":999,"run_id":"%s","run_attempt":"%s"}' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT")
+          set +e
+          STALE_OUTPUT=$(printf '%s\n' "$STALE_PAYLOAD" | gcloud storage cp - "$URI" --if-generation-match="$GEN_N" 2>&1)
+          STALE_EXIT=$?
+          set -e
+
+          if [[ "$STALE_EXIT" -eq 0 ]]; then
+            echo "Stale generation write unexpectedly succeeded" >&2
+            exit 1
+          fi
+          if ! grep -Eiq 'HTTP[^0-9]*412|412[[:space:]]+Precondition' <<<"$STALE_OUTPUT"; then
+            echo "Stale generation write failed without explicit HTTP 412 evidence" >&2
+            exit 1
+          fi
+
+          FINAL_GEN=$(gcloud storage objects describe "$URI" --format='value(generation)')
+          FINAL_PAYLOAD=$(gcloud storage cat "$URI")
+          [[ "$FINAL_GEN" == "$GEN_NEW" ]]
+          [[ "$FINAL_PAYLOAD" == "$PAYLOAD_V2" ]]
+          [[ "$FINAL_PAYLOAD" != *'"epoch":999'* ]]
+
+          printf '%s\n' \
+            "runtime: GitHub Actions hosted" \
+            "project: verdant-sprite-487903-k9" \
+            "bucket: ${BUCKET}" \
+            "object: ${OBJECT}" \
+            "session_m_read: PASS" \
+            "conditional_create: PASS" \
+            "generation_matched_update: PASS" \
+            "stale_generation_http: 412" \
+            "stale_generation_rejection: PASS" \
+            "final_authority_preserved: PASS" \
+            "production_data_touched: false" \
+            "repository_application_executed: false" \
+            "service_account_used: false" \
+            "credential_secret_used: false"
