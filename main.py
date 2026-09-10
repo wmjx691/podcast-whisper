@@ -1,5 +1,3 @@
-from dotenv import load_dotenv
-load_dotenv() # 這行會自動把 .env 裡面的東西載入到環境變數中
 import os
 import sys
 import re
@@ -7,13 +5,29 @@ import re
 # 將 src 目錄加入系統路徑，方便載入模組
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
-from idempotency_checker import IdempotencyChecker
-from rss_parser import PodcastDownloader
-from transcriber import PodcastTranscriber, detect_environment
-from upload_to_drive import upload_files_to_drive, get_project_root
-from yt_downloader import YouTubeDownloader
+def run_offline_pipeline(*, force=False, **dependencies):
+    """Explicit Segment 3A composition boundary; caller supplies all dependencies."""
+    from pipeline_orchestrator import PipelineOrchestrator, RunReport
+
+    try:
+        report = PipelineOrchestrator(**dependencies).run(force=force)
+    except Exception as error:
+        report = RunReport(run_errors=[dict(phase="configuration", reason=str(error))])
+    print("Segment 3A: " + ", ".join(
+        f"{name}={len(getattr(report, name))}" for name in
+        ("processed", "recovered", "skipped", "failed", "pending", "run_errors")))
+    return report
 
 def main():
+    # Legacy CLI remains explicit; the offline boundary never initializes it.
+    from dotenv import load_dotenv
+    load_dotenv()
+    from idempotency_checker import IdempotencyChecker
+    from rss_parser import PodcastDownloader
+    from transcriber import PodcastTranscriber, detect_environment
+    from upload_to_drive import upload_files_to_drive, get_project_root
+    from yt_downloader import YouTubeDownloader
+
     print("========== 🚀 開始自動化 Podcast 轉錄流程 ==========")
     
     # --- 參數設定區 ---

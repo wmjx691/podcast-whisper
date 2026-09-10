@@ -1,51 +1,57 @@
 name: Auto Transcribe Podcast and Upload to Drive
 
-# Define trigger events
 on:
-  # 1. Allow manual trigger from the GitHub Actions tab (useful for testing)
-  workflow_dispatch: 
-  
-  # 2. Scheduled trigger (Cron Job)
+  workflow_dispatch:
   schedule:
-    # 02:00 UTC corresponds to 10:00 AM CST (Taiwan Time)
-    # 1,4 means it runs every Monday (1) and Thursday (4)
     - cron: '0 2 * * 1,4'
+
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
   transcribe_and_upload:
-    runs-on: ubuntu-latest # Use the latest Ubuntu virtual machine
-    
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.PODCAST_PRODUCTION_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      PODCAST_FEED_NAMESPACE: ${{ vars.PODCAST_FEED_NAMESPACE }}
+      PODCAST_RSS_URL: ${{ vars.PODCAST_RSS_URL }}
+      PODCAST_CUTOVER_AT: ${{ vars.PODCAST_CUTOVER_AT }}
+      PODCAST_DRIVE_TOKEN_JSON: ${{ secrets.PODCAST_DRIVE_TOKEN_JSON }}
+      PODCAST_DRIVE_ARTIFACT_FOLDER_ID: ${{ vars.PODCAST_DRIVE_ARTIFACT_FOLDER_ID }}
+      PODCAST_DRIVE_SNAPSHOT_FOLDER_ID: ${{ vars.PODCAST_DRIVE_SNAPSHOT_FOLDER_ID }}
+      PODCAST_GCP_PROJECT_ID: ${{ vars.PODCAST_GCP_PROJECT_ID }}
+      PODCAST_GCP_WIF_PROVIDER: ${{ vars.PODCAST_GCP_WIF_PROVIDER }}
+      PODCAST_GCS_AUTHORITY_BUCKET: ${{ vars.PODCAST_GCS_AUTHORITY_BUCKET }}
+      PODCAST_GCS_AUTHORITY_OBJECT: ${{ vars.PODCAST_GCS_AUTHORITY_OBJECT }}
+      PODCAST_AUTH_OWNER: ${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}
+      PODCAST_AUTH_LEASE_SECONDS: ${{ vars.PODCAST_AUTH_LEASE_SECONDS }}
+      PODCAST_AUTH_RENEW_INTERVAL_SECONDS: ${{ vars.PODCAST_AUTH_RENEW_INTERVAL_SECONDS }}
+      PODCAST_AUTH_SAFETY_MARGIN_SECONDS: ${{ vars.PODCAST_AUTH_SAFETY_MARGIN_SECONDS }}
+      PODCAST_AUTH_CLOCK_UNCERTAINTY_SECONDS: ${{ vars.PODCAST_AUTH_CLOCK_UNCERTAINTY_SECONDS }}
+      PODCAST_AUTH_REQUEST_DEADLINE_SECONDS: ${{ vars.PODCAST_AUTH_REQUEST_DEADLINE_SECONDS }}
+      PODCAST_AUTH_RECONCILIATION_READS: ${{ vars.PODCAST_AUTH_RECONCILIATION_READS }}
+      PODCAST_RSS_TIMEOUT_SECONDS: ${{ vars.PODCAST_RSS_TIMEOUT_SECONDS }}
+      PODCAST_AUDIO_TIMEOUT_SECONDS: ${{ vars.PODCAST_AUDIO_TIMEOUT_SECONDS }}
+      PODCAST_WORK_ROOT: ${{ runner.temp }}/podcast-production
     steps:
-    - name: 📥 Checkout Repository
-      uses: actions/checkout@v4
-
-    - name: 🐍 Setup Python Environment
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-        cache: 'pip' # Cache pip dependencies to speed up future runs
-
-    - name: 🛠️ Install System Dependencies (FFmpeg)
-      # Whisper requires FFmpeg for audio processing
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y ffmpeg
-
-    - name: 📦 Install Python Dependencies
-      run: |
-        pip install -r requirements.txt
-
-    - name: 🔑 Prepare Environment Variables and Credentials
-      # Map GitHub Secrets to environment variables and files for the runner
-      env:
-        GCP_TOKEN: ${{ secrets.GCP_TOKEN_JSON }}
-      run: |
-        # Create .env file for the target Google Drive Folder ID
-        echo "DRIVE_FOLDER_ID=${{ secrets.DRIVE_FOLDER_ID }}" > .env
-        
-        # Create token.json for Google API OAuth authentication
-        echo "$GCP_TOKEN" > token.json
-
-    - name: 🚀 Run Main Pipeline (Download, Transcribe, Upload)
-      run: |
-        python main.py
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Setup Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install System Dependencies (FFmpeg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      - name: Install Python Dependencies
+        run: pip install -r requirements.txt
+      - name: Authenticate Production Direct WIF
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.PODCAST_GCP_WIF_PROVIDER }}
+          project_id: ${{ vars.PODCAST_GCP_PROJECT_ID }}
+      - name: Run Production Pipeline
+        run: python -m src.production_runtime

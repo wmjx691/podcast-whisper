@@ -8,6 +8,82 @@ from typing import List, Dict, Optional, Union, Set
 
 from utils import get_project_root, detect_environment
 
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from episode_identity import EpisodeObservation
+
+
+@dataclass(frozen=True)
+class PublishedObservation:
+    """Source time evidence attached to one observation, never part of identity."""
+
+    observation: EpisodeObservation
+    published_at: Optional[datetime] = None
+    publication_text: Optional[str] = None
+
+    def with_audio_path(self, path):
+        return replace(self, observation=self.observation.with_audio_path(path))
+
+
+def parse_published_observations(rss_content: bytes, *, feed_namespace: str):
+    """Additive supplied-bytes API; ambiguous/zoneless pubDate fails closed.
+
+    Association is by the same XML item order, never title, filename or URL.
+    Download adapters must carry this wrapper through with_audio_path().
+    """
+    from xml.etree import ElementTree
+
+    observations = parse_rss_observations(rss_content, feed_namespace=feed_namespace)
+    items = ElementTree.fromstring(rss_content).findall("channel/item")
+    result = []
+    for observation, item in zip(observations, items):
+        dates = item.findall("pubDate")
+        raw = dates[0].text if len(dates) == 1 and len(dates[0]) == 0 else None
+        published = None
+        if raw:
+            try:
+                parsed = parsedate_to_datetime(raw)
+                if parsed.utcoffset() is not None:
+                    published = parsed.astimezone(timezone.utc)
+            except (TypeError, ValueError, OverflowError):
+                pass
+        result.append(PublishedObservation(observation, published, raw))
+    return result
+
+
+def parse_rss_observations(rss_content: bytes, *, feed_namespace: str):
+    """Opt-in RSS 2.0 observations from supplied bytes; never fetch or download.
+
+    feedparser maps RSS GUID to entry.id (and sometimes link). Read the actual
+    RSS element here so generic entry IDs/links cannot become GUID evidence,
+    and preserve GUID text without feedparser's URI/whitespace normalization.
+    Call observation.with_audio_path(...) to associate caller-supplied audio.
+    """
+    from xml.etree import ElementTree
+    from episode_identity import EpisodeObservation, _require_text
+
+    _require_text(feed_namespace, "feed_namespace")
+    if not isinstance(rss_content, bytes):
+        raise TypeError("rss_content must be supplied XML bytes, not a URL/path")
+    root = ElementTree.fromstring(rss_content)
+    if root.tag != "rss" or root.find("channel") is None:
+        raise ValueError("explicit RSS channel/item evidence required")
+    observations = []
+    for item in root.findall("channel/item"):
+        guids = item.findall("guid")
+        guid = guids[0].text if len(guids) == 1 and len(guids[0]) == 0 else None
+        if guid is not None and not guid.strip():
+            guid = None
+        enclosure = next((e.get("url") for e in item.findall("enclosure")
+                          if e.get("type", "").startswith("audio")), None)
+        observations.append(EpisodeObservation(
+            feed_namespace=feed_namespace, source_guid=guid,
+            title=item.findtext("title", ""), enclosure_url=enclosure,
+        ))
+    return observations
+
+
 def get_project_root():
     """回傳專案根目錄"""
     if detect_environment():
