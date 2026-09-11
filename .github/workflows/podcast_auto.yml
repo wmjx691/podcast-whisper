@@ -33,7 +33,6 @@ jobs:
       PODCAST_AUTH_RECONCILIATION_READS: ${{ vars.PODCAST_AUTH_RECONCILIATION_READS }}
       PODCAST_RSS_TIMEOUT_SECONDS: ${{ vars.PODCAST_RSS_TIMEOUT_SECONDS }}
       PODCAST_AUDIO_TIMEOUT_SECONDS: ${{ vars.PODCAST_AUDIO_TIMEOUT_SECONDS }}
-      PODCAST_WORK_ROOT: ${{ runner.temp }}/podcast-production
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -54,4 +53,6 @@ jobs:
           workload_identity_provider: ${{ vars.PODCAST_GCP_WIF_PROVIDER }}
           project_id: ${{ vars.PODCAST_GCP_PROJECT_ID }}
       - name: Run Production Pipeline
+        env:
+          PODCAST_WORK_ROOT: ${{ runner.temp }}/podcast-production
         run: python -m src.production_runtime
