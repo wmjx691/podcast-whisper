@@ -16,6 +16,10 @@ def run_offline_pipeline(*, force=False, **dependencies):
     print("Segment 3A: " + ", ".join(
         f"{name}={len(getattr(report, name))}" for name in
         ("processed", "recovered", "skipped", "failed", "pending", "run_errors")))
+    for error in report.run_errors:
+        # Only structural fields reach logs; reason may contain credential material.
+        print(f"Segment 3A error: phase={error.get('phase', 'unspecified')} "
+              f"stage={error.get('stage', 'unspecified')}")
     return report
 
 def main():

@@ -136,31 +136,45 @@ class PipelineOrchestrator:
 
     def run(self, *, force=False):
         report = RunReport()
+        recovery_stage = "coordinator_setup"
         try:
             c = self._coordinator()
+            recovery_stage = "authority_read"
             initial = c.authority_store.read(c.timing.request_deadline)
             if initial is None or initial.record["snapshot"] is None:
                 report.run_errors.append(dict(reason="initialization_required"))
                 return report
             # Exact durable reads happen before acquisition and before discovery.
+            recovery_stage = "snapshot_read"
             state = c.snapshot_store.read(initial.record["snapshot"], c.timing.request_deadline)
+            recovery_stage = "recovery_facts_scan"
             self._facts(report, state)
+            recovery_stage = "recovery_acquire"
             self._confirmed(c.acquire(), "recovery_acquire")
+            recovery_stage = "active_work_recovery"
             work = c.observed.record["work"]
             if work is not None:
+                recovery_stage = "recovery_renew"
                 self._confirmed(c.renew(), "recovery_final_renew")
+                recovery_stage = "active_work_recovery"
                 known = observation_from_record(work["requirement"]["observation"], self.feed).identity is not None
                 self._confirmed(c.recover_work(adopt_candidate=known and work["candidate"] is not None), "recover_work")
+                recovery_stage = "recovered_snapshot_read"
                 state = self._state(c)
+                recovery_stage = "recovered_attempt_scan"
                 attempt = state["attempts"][work["attempt"]["id"]]
                 if attempt["outcome"] == "success":
                     report.recovered.append(dict(observation=attempt["observation"],
                                                  requirement=attempt["requirement"], attempt=attempt["id"]))
+            recovery_stage = "post_acquire_snapshot_read"
             state = self._state(c)
+            recovery_stage = "post_recovery_facts_scan"
             self._facts(report, state)
+            recovery_stage = "recovery_release"
             self._confirmed(c.release(), "recovery_release")
         except Exception as error:
-            report.run_errors.append(dict(phase="recovery", reason=str(error)))
+            report.run_errors.append(dict(phase="recovery", reason=str(error),
+                                          stage=recovery_stage))
             report.pending.append(dict(reason="reconciliation_required"))
             return report
 
