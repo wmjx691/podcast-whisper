@@ -229,8 +229,7 @@ def build_gcs(config, *, adc=None, transport_factory=None):
             import google.auth
             adc = google.auth.default
         credentials, _ = adc(scopes=['https://www.googleapis.com/auth/devstorage.read_write'],
-                             request=BoundedRequest(config.timing.request_deadline),
-                             quota_project_id=config.get('GCP_PROJECT_ID'))
+                             request=BoundedRequest(config.timing.request_deadline))
         return (transport_factory or AuthTransport)(credentials, config.timing.request_deadline)
     except Exception:
         raise RuntimeFailure('gcs_auth_unavailable') from None
