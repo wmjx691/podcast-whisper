@@ -13,12 +13,20 @@ from uuid import uuid4
 from authority_coordinator import AuthorityError
 from authority_heartbeat import AuthorityHeartbeat
 from episode_identity import AttemptReference
+from transcript_candidate import (WORK_STAGES, ExecutionContext, checkpoint,
+                                  current_execution, execution_context)
 from processing_state import (durable_evidence, eligible, item_key,
                               observation_from_record, observation_record,
                               requirement_record, validate_evidence)
 
 
 PRODUCTION_FEED_NAMESPACE = "podcast-whisper-primary"
+
+
+def safe_work_stage(value):
+    """Consume only our side channel, never metadata on arbitrary exceptions."""
+    stage = value.failed_stage if type(value) is ExecutionContext else None
+    return stage if type(stage) is str and stage in WORK_STAGES else "unspecified"
 
 
 @dataclass
@@ -81,10 +89,17 @@ class PipelineOrchestrator:
                               for r in state["requirements"].values() if r["status"] == "pending")
 
     def _attempt(self, requirement, report, *, recovery):
+        with execution_context():
+            return self._execute_attempt(requirement, report, recovery=recovery)
+
+    def _execute_attempt(self, requirement, report, *, recovery):
+        context = current_execution()
         c = self._coordinator()
-        reference = AttemptReference(observation_from_record(requirement["observation"], self.feed), self.new_id())
-        fact = dict(observation=requirement["observation"], requirement=requirement["id"],
-                    attempt=reference.attempt_id)
+        with checkpoint("episode_selected"):
+            reference = AttemptReference(observation_from_record(requirement["observation"], self.feed), self.new_id())
+            fact = dict(observation=requirement["observation"], requirement=requirement["id"],
+                        attempt=reference.attempt_id)
+        authority_stage = "unspecified"
         try:
             self._confirmed(c.acquire(), "acquire")
             self._confirmed(c.begin(requirement, reference), "begin")
@@ -102,7 +117,7 @@ class PipelineOrchestrator:
                         raise ValueError("worker candidate association mismatch")
                     if not candidate.valid:
                         report.run_errors.append(dict(phase="work", reason=candidate.reason,
-                                                      durable=False, **fact))
+                                                      durable=False, stage=safe_work_stage(context), **fact))
                     uploads = self.upload(candidate.candidate) if candidate.valid else None
                     evidence = durable_evidence(candidate, uploads)
                 if eligible(evidence):
@@ -115,22 +130,28 @@ class PipelineOrchestrator:
             except Exception as error:
                 evidence = None
                 reason = "local_work_error: " + str(error)
-                report.run_errors.append(dict(phase="work", reason=reason, durable=False, **fact))
+                report.run_errors.append(dict(phase="work", reason=reason, durable=False,
+                                              stage=safe_work_stage(context), **fact))
             finally:
                 heartbeat.stop()
                 heartbeat.join()
-            heartbeat.assert_healthy()
-            self._confirmed(c.renew(), "final_renew")
-            self._confirmed(c.publish_result(outcome=outcome, reason=reason, evidence=evidence), "publish_result")
-            state = self._state(c)
-            self._facts(report, state)
-            if outcome == "success":
-                (report.recovered if recovery else report.processed).append(fact)
-            self._confirmed(c.release(), "release")
+            authority_stage = "result_persist"
+            with checkpoint(authority_stage):
+                heartbeat.assert_healthy()
+                self._confirmed(c.renew(), "final_renew")
+                self._confirmed(c.publish_result(outcome=outcome, reason=reason, evidence=evidence), "publish_result")
+                state = self._state(c)
+                self._facts(report, state)
+                if outcome == "success":
+                    (report.recovered if recovery else report.processed).append(fact)
+            authority_stage = "run_finalize"
+            with checkpoint(authority_stage):
+                self._confirmed(c.release(), "release")
             return state
         except Exception as error:
             # Never reconcile/refresh this execution after losing confidence.
-            report.run_errors.append(dict(phase="authority", reason=str(error), **fact))
+            report.run_errors.append(dict(phase="authority", reason=str(error),
+                                          stage=authority_stage, **fact))
             report.pending.append(dict(reason="reconciliation_required", **fact))
             return None
 

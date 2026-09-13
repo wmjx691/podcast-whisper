@@ -304,7 +304,7 @@ def compose(config, dependencies):
     from episode_identity import AttemptReference
     from gcs_authority_store import GCSAuthorityStore
     from rss_parser import parse_published_observations
-    from transcript_candidate import build_candidate
+    from transcript_candidate import build_candidate, checkpoint, current_execution
 
     service, execute = dependencies.drive(config)
     transport = dependencies.gcs(config)
@@ -339,29 +339,82 @@ def compose(config, dependencies):
         try:
             url = reference.observation.enclosure_url
             if not _url(url):
-                raise RuntimeFailure('enclosure_invalid')
-            root = Path(config.get('WORK_ROOT')).resolve()
-            root.mkdir(parents=True, exist_ok=True)
-            audio_dir = root / 'audio' / reference.attempt_id
-            audio_dir.mkdir(parents=True, exist_ok=False)
-            audio = audio_dir / 'input.mp3'
-            dependencies.audio(url, audio, config.audio_timeout)
-            if not audio.is_file() or audio.is_symlink() or audio.stat().st_size == 0:
-                raise RuntimeFailure('audio_missing')
-            staging = root / 'candidates'
-            staging.mkdir(exist_ok=True)
-            if transcriber is None:
-                transcriber = dependencies.transcriber(model_size='small', device='cpu', compute_type='int8')
+                with checkpoint('audio_fetch'):
+                    raise RuntimeFailure('enclosure_invalid')
+            with checkpoint('path_prepare'):
+                root = Path(config.get('WORK_ROOT')).resolve()
+                root.mkdir(parents=True, exist_ok=True)
+                audio_dir = root / 'audio' / reference.attempt_id
+                audio_dir.mkdir(parents=True, exist_ok=False)
+                audio = audio_dir / 'input.mp3'
+            with checkpoint('audio_fetch'):
+                dependencies.audio(url, audio, config.audio_timeout)
+            with checkpoint('audio_validate'):
+                if not audio.is_file() or audio.is_symlink() or audio.stat().st_size == 0:
+                    raise RuntimeFailure('audio_missing')
+                staging = root / 'candidates'
+                staging.mkdir(exist_ok=True)
+            with checkpoint('transcriber_init'):
+                if transcriber is None:
+                    transcriber = dependencies.transcriber(model_size='small', device='cpu', compute_type='int8')
             local = AttemptReference(reference.observation.with_audio_path(audio), reference.attempt_id)
             result = build_candidate(transcriber, reference=local, staging_root=staging,
                 language='zh', initial_prompt='這是一段Podcast對話。請將語音內容準確轉錄為繁體中文。')
-            candidate = replace(result.candidate, reference=reference) if result.candidate else None
-            return replace(result, reference=reference, candidate=candidate)
+            with checkpoint('callback_finalize'):
+                candidate = replace(result.candidate, reference=reference) if result.candidate else None
+                return replace(result, reference=reference, candidate=candidate)
         except Exception:
+            # Preserve the existing public failure/reason boundary. Stage metadata
+            # stays in the attempt context, including for immutable exceptions.
             raise RuntimeFailure('production_work_failed') from None
     def upload(candidate):
-        return upload_candidate(service, candidate=candidate,
-                                target_folder_id=config.get('DRIVE_ARTIFACT_FOLDER_ID'))
+        context = current_execution()
+        if context is None:
+            return upload_candidate(service, candidate=candidate,
+                                    target_folder_id=config.get('DRIVE_ARTIFACT_FOLDER_ID'))
+        # Observe the accepted uploader without changing its snapshot, request,
+        # verification or stop-on-first-failure semantics. It advances to JSON
+        # only after TXT is verified, and returns fixed per-artifact outcomes.
+        stages = ('candidate_upload_txt', 'candidate_upload_json')
+        class ObservedFiles:
+            count = 0
+
+            def create(self, **kwargs):
+                if self.count == 1:
+                    context.event(stages[0], 'COMPLETE')
+                    context.event(stages[1], 'START')
+                self.count += 1
+                return service.files().create(**kwargs)
+
+            def get_media(self, **kwargs):
+                return service.files().get_media(**kwargs)
+
+        files = ObservedFiles()
+        class ObservedService:
+            def files(self):
+                return files
+
+        context.event(stages[0], 'START')
+        try:
+            result = upload_candidate(ObservedService(), candidate=candidate,
+                target_folder_id=config.get('DRIVE_ARTIFACT_FOLDER_ID'))
+        except Exception:
+            context.event(stages[min(files.count, 1)], 'FAIL')
+            context.event(stages[0], 'FAIL')
+            raise
+        for stage, artifact in zip(stages, result.artifacts):
+            if artifact.write_outcome == 'not_attempted':
+                continue
+            if stage not in context.active and stage not in context.failed:
+                # Pre-request preparation/local-integrity failure.
+                if stage == stages[1] and files.count < 2:
+                    context.event(stages[1], 'START')
+            context.event(stage, 'COMPLETE' if artifact.write_outcome == 'success'
+                          and artifact.verification_outcome == 'success' else 'FAIL')
+        # A preflight JSON failure prevents the pending TXT operation too.
+        if stages[0] in context.active:
+            context.event(stages[0], 'FAIL')
+        return result
     return dict(coordinator_factory=coordinator, discover=discover, work=work, upload=upload,
                 cutover_at=config.cutover_at, feed_namespace=config.get('FEED_NAMESPACE'))
 

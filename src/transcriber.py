@@ -4,14 +4,29 @@ import json
 import sys
 from faster_whisper import WhisperModel
 from typing import Optional
-from tqdm import tqdm
+from functools import wraps
+from transcript_candidate import checkpoint, current_execution
 from opencc import OpenCC
 
 from utils import get_project_root, detect_environment
 
 
+def _observed(stage, *, none_is_failure=False):
+    def decorate(operation):
+        @wraps(operation)
+        def invoke(*args, **kwargs):
+            with checkpoint(stage) as context:
+                result = operation(*args, **kwargs)
+                if none_is_failure and result is None:
+                    context.event(stage, "FAIL")
+                return result
+        return invoke
+    return decorate
+
+
 # --- 核心轉錄類別 ---
 class PodcastTranscriber:
+    @_observed("transcriber_init")
     def __init__(self, model_size: str, device: str, compute_type: str):
         project_root = get_project_root()
         model_root = os.path.join(project_root, "models")
@@ -23,7 +38,6 @@ class PodcastTranscriber:
         if not os.path.exists(model_root):
             os.makedirs(model_root)
 
-        print(f"🚀 正在載入 Whisper 模型: {model_size} ({device}) | 精度: {compute_type}...")
         
         try:
             self.model = WhisperModel(
@@ -32,15 +46,13 @@ class PodcastTranscriber:
                 compute_type=compute_type,
                 download_root=model_root
             )
-            print("✅ 模型載入完成！")
-        except Exception as e:
-            print(f"❌ 模型載入失敗: {e}")
+        except Exception:
             raise
 
     # 🌟 新增：加入 force_retranscribe 參數
+    @_observed("transcription", none_is_failure=True)
     def transcribe_file(self, audio_path: str, output_dir: str, language: str, initial_prompt: str, force_retranscribe: bool = False) -> Optional[str]:
         if not os.path.exists(audio_path):
-            print(f"❌ 錯誤：找不到檔案 {audio_path}")
             return None
 
         file_name = os.path.basename(audio_path)
@@ -55,12 +67,7 @@ class PodcastTranscriber:
         # 🌟 修改：跳過邏輯加上 force_retranscribe 的判斷
         if os.path.exists(txt_path) and os.path.exists(json_path):
             if not force_retranscribe:
-                print(f"⏭️  跳過已轉錄檔案: {file_name}")
                 return txt_path
-            else:
-                print(f"⚠️  強制重轉模式啟動，即將覆蓋舊檔: {file_name}")
-
-        print(f"\n🎙️  開始轉錄: {file_name}")
         start_time = time.time()
 
         try:
@@ -74,7 +81,6 @@ class PodcastTranscriber:
                 condition_on_previous_text=False 
             )
 
-            print(f"   ℹ️  語言: {info.language} | 總長度: {info.duration:.2f} 秒")
             
             segments_data = [] # 用來存純對話片段
             full_text_lines = []
@@ -89,44 +95,39 @@ class PodcastTranscriber:
             repeat_count = 0
             MAX_REPEATS = 1   # 允許重複幾次？ 1 代表允許出現兩次 (原句 + 1次重複)
 
-            # 設定進度條
-            with tqdm(total=round(info.duration, 2), unit='s', desc="Processing", leave=True, ascii=True, ncols=100) as pbar:
-                for i, segment in enumerate(segments, 1):
-                    raw_text = segment.text.strip()
-                    
-                    # --- 強制轉繁體 ---
-                    text = self.cc.convert(raw_text)
-                    
-                    # --- 改良版去重邏輯 ---
-                    if text == last_text:
-                        repeat_count += 1
-                    else:
-                        repeat_count = 0  # 內容不同，重置計數器
-                    
-                    last_text = text # 更新上一句記錄
+            for i, segment in enumerate(segments, 1):
+                current_execution().progress(segment.end, info.duration)
+                raw_text = segment.text.strip()
 
-                    # 如果重複次數超過閾值，則跳過 (視為幻覺)
-                    if repeat_count > MAX_REPEATS:
-                        continue
+                # --- 強制轉繁體 ---
+                text = self.cc.convert(raw_text)
 
-                    start_m, start_s = divmod(int(segment.start), 60)
-                    end_m, end_s = divmod(int(segment.end), 60)
-                    time_str = f"[{start_m:02d}:{start_s:02d} -> {end_m:02d}:{end_s:02d}]"
-                    
-                    line = f"{time_str} {text}"
-                    full_text_lines.append(line)
-                    
-                    segments_data.append({
-                        "id": i,
-                        "start": segment.start,
-                        "end": segment.end,
-                        "text": text
-                    })
+                # --- 改良版去重邏輯 ---
+                if text == last_text:
+                    repeat_count += 1
+                else:
+                    repeat_count = 0  # 內容不同，重置計數器
 
-                    # 更新進度條
-                    # segment.end 是目前這句話結束的時間點
-                    # 我們將進度條更新到這個時間點
-                    pbar.update(segment.end - pbar.n)
+                last_text = text # 更新上一句記錄
+
+                # 如果重複次數超過閾值，則跳過 (視為幻覺)
+                if repeat_count > MAX_REPEATS:
+                    continue
+
+                start_m, start_s = divmod(int(segment.start), 60)
+                end_m, end_s = divmod(int(segment.end), 60)
+                time_str = f"[{start_m:02d}:{start_s:02d} -> {end_m:02d}:{end_s:02d}]"
+
+                line = f"{time_str} {text}"
+                full_text_lines.append(line)
+
+                segments_data.append({
+                    "id": i,
+                    "start": segment.start,
+                    "end": segment.end,
+                    "text": text
+                })
+
 
             # 寫入 TXT
             with open(txt_path, "w", encoding="utf-8") as f:
@@ -150,11 +151,9 @@ class PodcastTranscriber:
                 json.dump(final_json_data, f, ensure_ascii=False, indent=2)
 
             duration = time.time() - start_time
-            print(f"✅ 完成！耗時: {duration:.2f}s")
             return txt_path
 
-        except Exception as e:
-            print(f"❌ 失敗: {file_name} - {e}")
+        except Exception:
             return None
 
     # 🌟 修改：加入 force_retranscribe 參數並往下傳遞
