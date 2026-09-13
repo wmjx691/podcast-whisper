@@ -267,16 +267,29 @@ def fetch_audio(url, path, timeout):
     try:
         start = time.monotonic()
         with _session() as session:
-            with session.get(url, timeout=timeout, allow_redirects=False, stream=True) as response:
-                if response.status_code != 200:
-                    raise RuntimeFailure('audio_http_failure')
-                with path.open('xb') as output:
-                    for chunk in response.iter_content(chunk_size=65536):
-                        if time.monotonic() - start > timeout:
-                            raise RuntimeFailure('audio_deadline_exceeded')
-                        output.write(chunk)
-                    if time.monotonic() - start > timeout:
-                        raise RuntimeFailure('audio_deadline_exceeded')
+            request_timeout = timeout
+            for hop in range(2):
+                with session.get(url, timeout=request_timeout, allow_redirects=False, stream=True) as response:
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        location = response.headers.get('Location')
+                        if hop or not isinstance(location, str) or not _url(location, https_only=True):
+                            raise RuntimeFailure('audio_http_failure')
+                        url = location
+                    elif response.status_code != 200:
+                        raise RuntimeFailure('audio_http_failure')
+                    else:
+                        with path.open('xb') as output:
+                            for chunk in response.iter_content(chunk_size=65536):
+                                if time.monotonic() - start > timeout:
+                                    raise RuntimeFailure('audio_deadline_exceeded')
+                                output.write(chunk)
+                            if time.monotonic() - start > timeout:
+                                raise RuntimeFailure('audio_deadline_exceeded')
+                        return
+                # Closing the first response also consumes the original budget.
+                request_timeout = timeout - (time.monotonic() - start)
+                if request_timeout <= 0:
+                    raise RuntimeFailure('audio_deadline_exceeded')
     except Exception:
         raise RuntimeFailure('audio_fetch_failed') from None
 
